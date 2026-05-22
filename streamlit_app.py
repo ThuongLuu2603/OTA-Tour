@@ -17,10 +17,25 @@ import streamlit as st
 
 SHEET_ID = "1sI34D88zsmSrN7Jf9fS3jh4aUvaep-blxnBR1CGq9eM"
 GID = "1729132868"
+GID_VIETRAVEL = "620817544"
 CSV_URL = (
     f"https://docs.google.com/spreadsheets/d/{SHEET_ID}"
     f"/export?format=csv&gid={GID}"
 )
+CSV_URL_VIETRAVEL = (
+    f"https://docs.google.com/spreadsheets/d/{SHEET_ID}"
+    f"/export?format=csv&gid={GID_VIETRAVEL}"
+)
+
+PAGES = [
+    "📊 Tổng Quan",
+    "💰 Phân Tích Giá",
+    "🗺️ Thị Trường",
+    "🏢 Đối Thủ",
+    "📅 Lịch Khởi Hành",
+    "📋 Dữ Liệu",
+    "🔄 Vietravel",
+]
 
 PRIMARY = "#003580"
 # Control chars invalid in Excel/XML (e.g. backspace from scraped sheet data)
@@ -212,10 +227,20 @@ def _price_segment(p):
 # ── DATA LOADING ──────────────────────────────────────────────────────────────
 
 
-@st.cache_data(ttl=3600, show_spinner="Đang tải dữ liệu từ Google Sheets...")
+@st.cache_data(ttl=3600, show_spinner="Đang tải dữ liệu đối thủ từ Google Sheets...")
 def load_data() -> pd.DataFrame:
     df_raw = pd.read_csv(CSV_URL, header=0, dtype=str)
     return _transform(df_raw)
+
+
+@st.cache_data(ttl=300, show_spinner="Đang tải sheet Vietravel...")
+def load_vietravel_sheet() -> pd.DataFrame:
+    """Đọc tab Vietravel (~150 dòng) — nhanh hơn sheet Tổng Hợp Tour."""
+    try:
+        df = pd.read_csv(CSV_URL_VIETRAVEL, header=0, dtype=str)
+    except Exception:
+        return pd.DataFrame()
+    return df.fillna("")
 
 
 def _transform(raw: pd.DataFrame) -> pd.DataFrame:
@@ -1070,13 +1095,41 @@ def tab_data(df: pd.DataFrame):
 # ── TAB 7: VIETRAVEL SYNC ─────────────────────────────────────────────────────
 
 
+@st.cache_data(ttl=600, show_spinner="Đang quét travel.com.vn (2 trang, ~15 giây)...")
+def _cached_scrape_vietravel() -> pd.DataFrame:
+    from vietravel_scraper import scrape_all_vietravel_tours
+
+    return scrape_all_vietravel_tours()
+
+
 def tab_vietravel_sync():
-    st.subheader("🔄 Quét tour Vietravel → Google Sheets")
+    st.subheader("🔄 Tour Vietravel — travel.com.vn")
     st.caption(
         "Nguồn: [Du lịch trong nước](https://travel.com.vn/du-lich-viet-nam.aspx) · "
         "[Du lịch nước ngoài](https://travel.com.vn/du-lich-nuoc-ngoai.aspx) → "
-        f"[Sheet Vietravel](https://docs.google.com/spreadsheets/d/{SHEET_ID}/edit#gid=620817544)"
+        f"[Sheet Vietravel](https://docs.google.com/spreadsheets/d/{SHEET_ID}/edit#gid={GID_VIETRAVEL})"
     )
+
+    sheet_df = load_vietravel_sheet()
+    if not sheet_df.empty:
+        st.markdown("#### Dữ liệu trên Google Sheet (cột Z = link thô cho app)")
+        link_col = "Link" if "Link" in sheet_df.columns else None
+        col_cfg = {}
+        if link_col:
+            col_cfg[link_col] = st.column_config.LinkColumn("Link", display_text="🔗 Xem")
+        st.dataframe(
+            sheet_df,
+            use_container_width=True,
+            hide_index=True,
+            height=360,
+            column_config=col_cfg,
+        )
+        st.caption(f"**{len(sheet_df)}** dòng trên Sheet · Cập nhật bằng nút bên dưới khi cần quét mới từ web.")
+    else:
+        st.info("Sheet Vietravel đang trống. Bấm **Quét & Lưu** để đồng bộ lần đầu.")
+
+    st.divider()
+    st.markdown("#### Đồng bộ từ travel.com.vn")
 
     col_a, col_b = st.columns(2)
     with col_a:
@@ -1109,14 +1162,13 @@ client_id = "..."
         )
 
     if preview_only or sync_sheet:
-        with st.spinner("Đang quét travel.com.vn (trong nước + nước ngoài)..."):
-            try:
-                from vietravel_scraper import scrape_all_vietravel_tours, write_to_google_sheet
+        try:
+            from vietravel_scraper import write_to_google_sheet
 
-                vdf = scrape_all_vietravel_tours()
-            except Exception as exc:
-                st.error(f"Lỗi khi quét: {exc}")
-                return
+            vdf = _cached_scrape_vietravel()
+        except Exception as exc:
+            st.error(f"Lỗi khi quét: {exc}")
+            return
 
         if vdf.empty:
             st.warning("Không quét được tour nào. Vui lòng thử lại sau.")
@@ -1161,6 +1213,9 @@ client_id = "..."
                     )
                     st.json(meta)
                     st.cache_data.clear()
+                    load_vietravel_sheet.clear()
+                    _cached_scrape_vietravel.clear()
+                    st.rerun()
                 except FileNotFoundError as exc:
                     st.error(str(exc))
                 except Exception as exc:
@@ -1220,7 +1275,26 @@ def main():
         unsafe_allow_html=True,
     )
 
-    # ── Load data
+    # Chỉ render MỘT trang (st.tabs chạy cả 7 tab mỗi lần → rất chậm)
+    page = st.radio("Trang", PAGES, horizontal=True, label_visibility="collapsed")
+
+    if page == "🔄 Vietravel":
+        with st.sidebar:
+            st.markdown(
+                f"<div style='text-align:center;padding:16px 0 8px;'>"
+                f"<div style='font-size:2.4rem;'>✈️</div>"
+                f"<div style='font-weight:700;font-size:1.05rem;color:{PRIMARY};'>Vietravel</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+            if st.button("🔄 Làm mới Sheet Vietravel", use_container_width=True):
+                load_vietravel_sheet.clear()
+                _cached_scrape_vietravel.clear()
+                st.rerun()
+        tab_vietravel_sync()
+        return
+
+    # Các trang phân tích đối thủ (~3MB sheet)
     try:
         df = load_data()
     except Exception as exc:
@@ -1235,34 +1309,20 @@ def main():
         st.error("Dữ liệu trống hoặc không đọc được. Vui lòng kiểm tra Google Sheet.")
         return
 
-    # ── Sidebar filters → filtered dataframe
     fdf = render_sidebar(df)
 
-    # ── Tabs
-    t1, t2, t3, t4, t5, t6, t7 = st.tabs([
-        "📊 Tổng Quan",
-        "💰 Phân Tích Giá",
-        "🗺️ Thị Trường",
-        "🏢 Đối Thủ",
-        "📅 Lịch Khởi Hành",
-        "📋 Dữ Liệu",
-        "🔄 Vietravel",
-    ])
-
-    with t1:
+    if page == "📊 Tổng Quan":
         tab_overview(fdf)
-    with t2:
+    elif page == "💰 Phân Tích Giá":
         tab_price(fdf)
-    with t3:
+    elif page == "🗺️ Thị Trường":
         tab_market(fdf)
-    with t4:
+    elif page == "🏢 Đối Thủ":
         tab_competitor(fdf)
-    with t5:
+    elif page == "📅 Lịch Khởi Hành":
         tab_schedule(fdf)
-    with t6:
+    elif page == "📋 Dữ Liệu":
         tab_data(fdf)
-    with t7:
-        tab_vietravel_sync()
 
 
 if __name__ == "__main__":
