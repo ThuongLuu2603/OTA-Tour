@@ -18,9 +18,16 @@ SHEET_ID = "1sI34D88zsmSrN7Jf9fS3jh4aUvaep-blxnBR1CGq9eM"
 GID_VIETRAVEL = 620817544
 
 SOURCES = [
-    ("https://travel.com.vn/du-lich-viet-nam.aspx", "Du lịch trong nước"),
-    ("https://travel.com.vn/du-lich-nuoc-ngoai.aspx", "Du lịch nước ngoài"),
+    "https://travel.com.vn/du-lich-viet-nam.aspx",
+    "https://travel.com.vn/du-lich-nuoc-ngoai.aspx",
 ]
+
+# Cột A–Z (26 cột); Z = link thô cho UI
+SHEET_NUM_COLS = 26
+COL_LINK_TOUR = 9   # J
+COL_MA_TOUR = 12    # M
+COL_CAP_NHAT = 13   # N
+COL_LINK_RAW = 25   # Z
 
 HEADERS = {
     "User-Agent": (
@@ -65,6 +72,35 @@ def _decode_json_str(s: str) -> str:
             .replace("\\n", " ")
             .replace("\\t", " ")
         )
+
+
+def _hyperlink_formula(url: str) -> str:
+    """Google Sheets VN dùng dấu ; trong công thức."""
+    safe = (url or "").replace('"', '""')
+    return f'=HYPERLINK("{safe}";"Xem chi tiết")'
+
+
+def enrich_market_and_route(df: pd.DataFrame) -> pd.DataFrame:
+    """Áp dụng quy tắc Thị trường (keyword) rồi Tuyến tour (sheet Điểm tuyến Tour)."""
+    from market_rules import resolve_thi_truong
+    from route_rules import load_route_rules, resolve_tuyen_tour
+
+    out = df.copy()
+    rules = load_route_rules()
+    out["thi_truong"] = out.apply(
+        lambda r: resolve_thi_truong(r.get("ten_tour", ""), r.get("lich_trinh", "")),
+        axis=1,
+    )
+    out["tuyen_tour"] = out.apply(
+        lambda r: resolve_tuyen_tour(
+            r.get("thi_truong", ""),
+            r.get("ten_tour", ""),
+            r.get("lich_trinh", ""),
+            rules,
+        ),
+        axis=1,
+    )
+    return out
 
 
 def _fmt_price(v: int | None) -> str:
@@ -112,7 +148,7 @@ def _extract_destination(chunk: str, max_len: int = 8000) -> str:
     return ""
 
 
-def scrape_listing_page(url: str, thi_truong: str) -> list[dict[str, Any]]:
+def scrape_listing_page(url: str) -> list[dict[str, Any]]:
     """Scrape all tour cards from a Vietravel listing page."""
     resp = requests.get(url, headers=HEADERS, timeout=90)
     resp.raise_for_status()
@@ -147,15 +183,15 @@ def scrape_listing_page(url: str, thi_truong: str) -> list[dict[str, Any]]:
         tours.append(
             {
                 "cong_ty": COMPANY,
-                "thi_truong": thi_truong,
-                "tuyen_tour": thi_truong,
+                "thi_truong": "",
+                "tuyen_tour": "",
                 "ten_tour": title,
                 "lich_trinh": lich_trinh,
                 "diem_kh": dep,
                 "thoi_gian": duration,
                 "gia": _fmt_price(gia),
                 "lich_kh": lich_kh,
-                "link_tour": f'=HYPERLINK("{link}","Xem chi tiết")',
+                "link_tour": _hyperlink_formula(link),
                 "link_url": link,
                 "page_id": m.group(1),
                 "page_code": m.group(2),
@@ -168,61 +204,54 @@ def scrape_listing_page(url: str, thi_truong: str) -> list[dict[str, Any]]:
 
 
 def scrape_all_vietravel_tours() -> pd.DataFrame:
-    """Scrape domestic + international listings."""
+    """Scrape domestic + international listings, then classify market & route."""
     all_tours: list[dict[str, Any]] = []
-    for url, market in SOURCES:
-        all_tours.extend(scrape_listing_page(url, market))
+    for url in SOURCES:
+        all_tours.extend(scrape_listing_page(url))
     if not all_tours:
         return pd.DataFrame()
-    return pd.DataFrame(all_tours)
+    df = pd.DataFrame(all_tours)
+    return enrich_market_and_route(df)
+
+
+def _sheet_headers() -> list[str]:
+    headers = [""] * SHEET_NUM_COLS
+    headers[0] = "Tên Công Ty"
+    headers[1] = "Thị trường"
+    headers[2] = "Tuyến tour"
+    headers[3] = "Tên Tour"
+    headers[4] = "Lịch trình"
+    headers[5] = "Điểm khởi hành"
+    headers[6] = "Thời gian"
+    headers[7] = "Giá"
+    headers[8] = "Lịch khởi hành"
+    headers[COL_LINK_TOUR] = "Link tour"
+    headers[10] = "Khách sạn"
+    headers[11] = "Hàng không"
+    headers[COL_MA_TOUR] = "Mã tour"
+    headers[COL_CAP_NHAT] = "Cập nhật"
+    headers[COL_LINK_RAW] = "Link"
+    return headers
 
 
 def tours_to_sheet_rows(df: pd.DataFrame) -> list[list[str]]:
-    """Map scraped data to Google Sheet column order (competitor sheet layout)."""
-    columns = [
-        "Tên Công Ty",
-        "Thị trường",
-        "Tuyến tour",
-        "Tên Tour",
-        "Lịch trình",
-        "Điểm khởi hành",
-        "Thời gian",
-        "Giá",
-        "Lịch khởi hành",
-        "Link tour",
-        "Khách sạn",
-        "Hàng không",
-        "Link",
-        "Mã tour",
-        "Cập nhật",
-    ]
-    col_map = {
-        "cong_ty": "Tên Công Ty",
-        "thi_truong": "Thị trường",
-        "tuyen_tour": "Tuyến tour",
-        "ten_tour": "Tên Tour",
-        "lich_trinh": "Lịch trình",
-        "diem_kh": "Điểm khởi hành",
-        "thoi_gian": "Thời gian",
-        "gia": "Giá",
-        "lich_kh": "Lịch khởi hành",
-        "link_tour": "Link tour",
-        "link_url": "Link",
-        "page_code": "Mã tour",
-        "cap_nhat": "Cập nhật",
-    }
-
-    rows = [columns]
+    """Map scraped data to columns A–Z (link thô ở cột Z)."""
+    rows = [_sheet_headers()]
     for _, r in df.iterrows():
-        row = []
-        for c in columns:
-            if c == "Khách sạn":
-                row.append("")
-            elif c == "Hàng không":
-                row.append("")
-            else:
-                src = next((k for k, v in col_map.items() if v == c), None)
-                row.append(str(r.get(src, "")) if src else "")
+        row = [""] * SHEET_NUM_COLS
+        row[0] = str(r.get("cong_ty", ""))
+        row[1] = str(r.get("thi_truong", ""))
+        row[2] = str(r.get("tuyen_tour", ""))
+        row[3] = str(r.get("ten_tour", ""))
+        row[4] = str(r.get("lich_trinh", ""))
+        row[5] = str(r.get("diem_kh", ""))
+        row[6] = str(r.get("thoi_gian", ""))
+        row[7] = str(r.get("gia", ""))
+        row[8] = str(r.get("lich_kh", ""))
+        row[COL_LINK_TOUR] = str(r.get("link_tour", ""))
+        row[COL_MA_TOUR] = str(r.get("page_code", ""))
+        row[COL_CAP_NHAT] = str(r.get("cap_nhat", ""))
+        row[COL_LINK_RAW] = str(r.get("link_url", ""))
         rows.append(row)
     return rows
 
@@ -288,6 +317,6 @@ def sync_vietravel_to_sheet() -> dict[str, Any]:
         raise RuntimeError("Không quét được tour nào từ travel.com.vn")
     meta = write_to_google_sheet(df)
     meta["tours_scraped"] = len(df)
-    meta["domestic"] = int((df["thi_truong"] == "Du lịch trong nước").sum())
-    meta["international"] = int((df["thi_truong"] == "Du lịch nước ngoài").sum())
+    meta["markets"] = int(df["thi_truong"].nunique())
+    meta["routes"] = int(df["tuyen_tour"].nunique())
     return meta

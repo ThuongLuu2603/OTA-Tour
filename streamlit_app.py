@@ -1124,8 +1124,8 @@ client_id = "..."
 
         c1, c2, c3 = st.columns(3)
         c1.metric("Tổng tour", len(vdf))
-        c2.metric("Trong nước", int((vdf["thi_truong"] == "Du lịch trong nước").sum()))
-        c3.metric("Nước ngoài", int((vdf["thi_truong"] == "Du lịch nước ngoài").sum()))
+        c2.metric("Thị trường", vdf["thi_truong"].nunique())
+        c3.metric("Tuyến tour", vdf["tuyen_tour"].nunique())
 
         show = vdf[
             ["ten_tour", "thi_truong", "diem_kh", "thoi_gian", "gia", "lich_kh", "link_url"]
