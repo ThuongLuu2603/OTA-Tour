@@ -23,6 +23,8 @@ CSV_URL = (
 )
 
 PRIMARY = "#003580"
+# Control chars invalid in Excel/XML (e.g. backspace from scraped sheet data)
+_ILLEGAL_EXCEL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 SEGMENT_ORDER = [
     "Budget (< 2tr)",
     "Mid (2–5tr)",
@@ -38,6 +40,23 @@ PRICE_BINS = [
 ]
 
 # ── DATA HELPERS ──────────────────────────────────────────────────────────────
+
+
+def _sanitize_text(val):
+    """Remove characters that break openpyxl / Excel export."""
+    if pd.isna(val):
+        return val
+    if isinstance(val, str):
+        return _ILLEGAL_EXCEL_RE.sub("", val).strip()
+    return val
+
+
+def _sanitize_df_for_excel(frame: pd.DataFrame) -> pd.DataFrame:
+    out = frame.copy()
+    for col in out.columns:
+        if out[col].dtype == object:
+            out[col] = out[col].map(_sanitize_text)
+    return out
 
 
 def _parse_price(val):
@@ -248,13 +267,16 @@ def _transform(raw: pd.DataFrame) -> pd.DataFrame:
         df = df[df[col].astype(str).str.strip().ne("")]
         df = df[df[col].astype(str).str.strip().ne("nan")]
 
-    # Clean string fields
-    for col in ["cong_ty", "thi_truong", "tuyen_tour", "ten_tour", "diem_kh", "lich_kh"]:
+    # Clean string fields (strip illegal control chars from scraped sheet text)
+    text_cols = ["cong_ty", "thi_truong", "tuyen_tour", "ten_tour",
+                 "lich_trinh", "diem_kh", "lich_kh", "thoi_gian", "link_url"]
+    for col in text_cols:
         if col in df.columns:
             df[col] = (
                 df[col].astype(str)
                 .str.strip()
                 .replace({"nan": "", "None": "", "NaN": ""})
+                .map(_sanitize_text)
             )
 
     # Derived columns
@@ -1027,8 +1049,9 @@ def tab_data(df: pd.DataFrame):
         )
     with cc:
         buf = io.BytesIO()
+        out_xl = _sanitize_df_for_excel(out)
         with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-            out.to_excel(writer, index=False, sheet_name="Tour Data")
+            out_xl.to_excel(writer, index=False, sheet_name="Tour Data")
         st.download_button(
             "📊 Tải Excel", data=buf.getvalue(),
             file_name=f"ota_{date.today()}.xlsx",
