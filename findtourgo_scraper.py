@@ -391,18 +391,24 @@ def _format_departure_dates(
 
 
 def _format_duration(item: dict[str, Any]) -> str:
+    """Ưu tiên duration API; tên tour chỉ lấy dạng 9N8Đ (không nhầm năm 2025)."""
+    days = item.get("duration")
+    try:
+        d = int(days) if days is not None else 0
+    except (TypeError, ValueError):
+        d = 0
+    if 1 <= d <= 45:
+        return f"{d} ngày"
+
     name = (item.get("name") or "").strip()
-    m = re.search(r"(\d+)\s*[Nn]\s*(\d+)\s*[Đđ]", name)
+    m = re.search(r"(?<!\d)(\d{1,2})\s*[Nn]\s*(\d{1,2})\s*[Đđ]", name)
     if m:
         return f"{m.group(1)}N{m.group(2)}Đ"
-    m = re.search(r"(\d+)\s*[Nn](?:\s*(\d+)\s*[Đđ])?", name)
+    m = re.search(r"(?<!\d)(\d{1,2})\s*[Nn]\b", name)
     if m:
-        if m.group(2):
-            return f"{m.group(1)}N{m.group(2)}Đ"
         return f"{m.group(1)}N"
-    days = item.get("duration")
-    if days:
-        return f"{days} ngày"
+    if 1 <= d <= 90:
+        return f"{d} ngày"
     return ""
 
 

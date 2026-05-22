@@ -13,6 +13,22 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+from market_metrics import (
+    DETAIL_SEGMENT_COLS,
+    METRIC_FOOTNOTE,
+    NHOM_THOI_ORDER,
+    ROUTE_DEP_COLS,
+    agg_route_dep,
+    COMPARISON_COLS,
+    compare_company_vs_market,
+    enrich_dataframe,
+    global_weighted_avg_price,
+    pivot_company_route,
+    rollup_route,
+    segment_prices,
+    sum_weighted_counts,
+)
+
 # ── CONSTANTS ─────────────────────────────────────────────────────────────────
 
 SHEET_ID = "1sI34D88zsmSrN7Jf9fS3jh4aUvaep-blxnBR1CGq9eM"
@@ -126,8 +142,11 @@ def _clean_dep(val):
     return raw if raw and raw.lower() != "nan" else "Không xác định"
 
 
+MAX_TOUR_DAYS = 45  # tour dài nhất hợp lý; tránh nhầm năm (2025N) → 2025 ngày
+
+
 def _parse_duration(val):
-    """'0.5 ngày' → 0.5,  '3N2D' → 3.0,  '' → None."""
+    """'0.5 ngày' → 0.5,  '3N2D' / '9N8Đ' → 3 / 9,  '' → None."""
     if pd.isna(val):
         return None
     s = str(val).strip().lower()
@@ -135,12 +154,17 @@ def _parse_duration(val):
         return None
     if "0.5" in s or "nửa" in s or "1/2" in s:
         return 0.5
-    m = re.match(r"^(\d+)\s*n", s)
+    # Chỉ 1–2 chữ số trước N (tránh 2025N, 2026N từ tên tour)
+    m = re.search(r"(?<!\d)(\d{1,2})\s*n(?:\s*(\d{1,2})\s*[dđ])?", s)
     if m:
-        return float(m.group(1))
+        days = float(m.group(1))
+        if 0 < days <= MAX_TOUR_DAYS:
+            return days
     m = re.search(r"(\d+(?:[.,]\d+)?)\s*ng", s)
     if m:
-        return float(m.group(1).replace(",", "."))
+        days = float(m.group(1).replace(",", "."))
+        if 0 < days <= MAX_TOUR_DAYS:
+            return days
     return None
 
 
@@ -364,6 +388,7 @@ def _transform(raw: pd.DataFrame) -> pd.DataFrame:
     df["phan_khuc"] = df["gia"].apply(_price_segment)
     df["lich_loai"] = df["lich_kh"].apply(_classify_schedule)
     df["ngay_kh_list"] = df["lich_kh"].apply(_extract_dates)
+    df = enrich_dataframe(df)
 
     return df.reset_index(drop=True)
 
@@ -383,6 +408,51 @@ def fmt_vnd(x, short: bool = False) -> str:
 
 def empty_state(msg: str = "Không có dữ liệu sau khi áp dụng bộ lọc."):
     st.info(f"ℹ️ {msg}")
+
+
+def _show_metric_note():
+    with st.expander("ℹ️ Cách tính Giá TB & số chuyến", expanded=False):
+        st.markdown(METRIC_FOOTNOTE)
+
+
+def _benchmark_company_rows(
+    company_df: pd.DataFrame,
+    market_df: pd.DataFrame,
+    *,
+    exclude_company: str | None = None,
+) -> pd.DataFrame:
+    """So từng SP với TT: giá tour tương đương = Giá TB/ngày (TT) × Ngày TB/đoàn (công ty)."""
+    out = company_df.dropna(subset=["gia"]).copy()
+    if "so_doan" not in out.columns:
+        out = enrich_dataframe(out)
+    co_seg = agg_route_dep(out, COMPARISON_COLS)
+    mkt_seg = agg_route_dep(market_df, COMPARISON_COLS, exclude_company=exclude_company)
+    if mkt_seg.empty or co_seg.empty:
+        out["gia_tb_o"] = np.nan
+        out["vs_pct"] = np.nan
+        return out
+    bench = co_seg[list(COMPARISON_COLS) + ["ngay_tb_doan"]].merge(
+        mkt_seg[list(COMPARISON_COLS) + ["gia_tb_ngay", "gia_tb_doan"]],
+        on=list(COMPARISON_COLS),
+        how="left",
+    )
+    ngay_co = bench["ngay_tb_doan"]
+    bench["gia_tb_o"] = np.where(
+        ngay_co.notna() & (ngay_co > 0) & bench["gia_tb_ngay"].notna(),
+        bench["gia_tb_ngay"] * ngay_co,
+        bench["gia_tb_doan"],
+    )
+    out = out.merge(
+        bench[list(COMPARISON_COLS) + ["gia_tb_o"]],
+        on=list(COMPARISON_COLS),
+        how="left",
+    )
+    out["vs_pct"] = np.where(
+        out["gia_tb_o"].notna() & (out["gia_tb_o"] > 0),
+        (out["gia"] - out["gia_tb_o"]) / out["gia_tb_o"] * 100,
+        np.nan,
+    )
+    return out
 
 
 def _no_data(df: pd.DataFrame) -> bool:
@@ -456,6 +526,10 @@ def render_sidebar(df: pd.DataFrame) -> pd.DataFrame:
         st.divider()
         pct = len(fdf) / max(len(df), 1) * 100
         st.metric("Sản phẩm đang xem", f"{len(fdf):,}", f"{pct:.0f}% tổng số")
+        if "trip_weight" in fdf.columns:
+            st.metric("Chuyến (có trọng số)", f"{fdf['trip_weight'].sum():,.0f}")
+        st.caption("Giá TB / thị phần chuyến: xem ℹ️ bên dưới.")
+        _show_metric_note()
 
     return fdf
 
@@ -467,13 +541,16 @@ def tab_overview(df: pd.DataFrame):
     if _no_data(df):
         return
 
+    _show_metric_note()
+
     # ── KPI Row
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("📦 Tổng sản phẩm", f"{len(df):,}")
-    c2.metric("🏢 Công ty đối thủ", f"{df['cong_ty'].nunique():,}")
-    c3.metric("🛣️ Tuyến tour", f"{df['tuyen_tour'].nunique():,}")
-    avg_p = df["gia"].mean()
-    c4.metric("💰 Giá trung bình", fmt_vnd(avg_p, short=True) if pd.notna(avg_p) else "N/A")
+    c2.metric("🚌 Tổng chuyến (TT)", f"{df['trip_weight'].sum():,.0f}")
+    c3.metric("🏢 Công ty đối thủ", f"{df['cong_ty'].nunique():,}")
+    c4.metric("🛣️ Tuyến tour", f"{df['tuyen_tour'].nunique():,}")
+    avg_p = global_weighted_avg_price(df)
+    c5.metric("💰 Giá TB / ngày đi", fmt_vnd(avg_p, short=True) if pd.notna(avg_p) else "N/A")
 
     st.divider()
 
@@ -482,37 +559,35 @@ def tab_overview(df: pd.DataFrame):
 
     with col1:
         mkt = (
-            df[df["thi_truong"].str.strip().ne("")]
-            .groupby("thi_truong")
-            .size()
-            .reset_index(name="Số SP")
-            .sort_values("Số SP")
+            sum_weighted_counts(
+                df[df["thi_truong"].str.strip().ne("")], ["thi_truong"]
+            )
+            .sort_values("so_chuyen")
         )
         fig = px.bar(
-            mkt, x="Số SP", y="thi_truong", orientation="h",
-            title="Số sản phẩm theo Thị trường",
-            labels={"thi_truong": "Thị trường"},
-            color="Số SP", color_continuous_scale="Blues",
+            mkt, x="so_chuyen", y="thi_truong", orientation="h",
+            title="Số chuyến theo Thị trường (có trọng số)",
+            labels={"thi_truong": "Thị trường", "so_chuyen": "Số chuyến"},
+            color="so_chuyen", color_continuous_scale="Blues",
         )
         fig.update_layout(showlegend=False, height=360, coloraxis_showscale=False)
         st.plotly_chart(fig, use_container_width=True)
 
     with col2:
         comp = (
-            df.groupby("cong_ty").size()
-            .reset_index(name="count")
-            .sort_values("count", ascending=False)
+            sum_weighted_counts(df, ["cong_ty"])
+            .sort_values("so_chuyen", ascending=False)
         )
         top10 = comp.head(10).copy()
-        rest = comp.iloc[10:]["count"].sum()
+        rest = comp.iloc[10:]["so_chuyen"].sum()
         if rest > 0:
             top10 = pd.concat(
-                [top10, pd.DataFrame({"cong_ty": ["Khác"], "count": [rest]})],
+                [top10, pd.DataFrame({"cong_ty": ["Khác"], "so_chuyen": [rest]})],
                 ignore_index=True,
             )
         fig = px.pie(
-            top10, values="count", names="cong_ty",
-            title="Thị phần sản phẩm theo Công ty (Top 10)",
+            top10, values="so_chuyen", names="cong_ty",
+            title="Thị phần chuyến theo Công ty (Top 10)",
             hole=0.45, color_discrete_sequence=px.colors.qualitative.Set2,
         )
         fig.update_traces(textposition="inside", textinfo="percent+label")
@@ -521,16 +596,16 @@ def tab_overview(df: pd.DataFrame):
 
     # ── Row 2: Top Routes
     top_rt = (
-        df[df["tuyen_tour"].str.strip().ne("")]
-        .groupby("tuyen_tour").size()
-        .reset_index(name="count")
-        .nlargest(15, "count")
+        sum_weighted_counts(
+            df[df["tuyen_tour"].str.strip().ne("")], ["tuyen_tour"]
+        )
+        .nlargest(15, "so_chuyen")
     )
     fig = px.bar(
-        top_rt, x="tuyen_tour", y="count",
-        title="Top 15 Tuyến Tour nhiều sản phẩm nhất",
-        labels={"tuyen_tour": "Tuyến", "count": "Số SP"},
-        color="count", color_continuous_scale="Blues",
+        top_rt, x="tuyen_tour", y="so_chuyen",
+        title="Top 15 Tuyến — nhiều chuyến nhất (có trọng số)",
+        labels={"tuyen_tour": "Tuyến", "so_chuyen": "Số chuyến"},
+        color="so_chuyen", color_continuous_scale="Blues",
     )
     fig.update_layout(showlegend=False, height=320, xaxis_tickangle=-35,
                       coloraxis_showscale=False)
@@ -539,6 +614,7 @@ def tab_overview(df: pd.DataFrame):
     # ── Row 3: Scatter Giá × Thời gian
     sct = df.dropna(subset=["gia", "so_ngay"])
     sct = sct[sct["thi_truong"].str.strip().ne("")]
+    sct = sct[(sct["so_ngay"] > 0) & (sct["so_ngay"] <= MAX_TOUR_DAYS)]
     if len(sct) > 0:
         fig = px.scatter(
             sct, x="so_ngay", y="gia",
@@ -553,13 +629,13 @@ def tab_overview(df: pd.DataFrame):
         st.plotly_chart(fig, use_container_width=True)
 
     # ── Row 4: Phân khúc giá toàn thị trường
-    seg = df.groupby("phan_khuc").size().reset_index(name="count")
+    seg = sum_weighted_counts(df, ["phan_khuc"])
     seg["phan_khuc"] = pd.Categorical(seg["phan_khuc"], categories=SEGMENT_ORDER, ordered=True)
     seg = seg.sort_values("phan_khuc")
     fig = px.bar(
-        seg, x="phan_khuc", y="count",
-        title="Phân bổ sản phẩm theo Phân khúc giá",
-        labels={"phan_khuc": "Phân khúc", "count": "Số SP"},
+        seg, x="phan_khuc", y="so_chuyen",
+        title="Phân bổ chuyến theo Phân khúc giá",
+        labels={"phan_khuc": "Phân khúc", "so_chuyen": "Số chuyến"},
         color="phan_khuc",
         color_discrete_sequence=["#2ecc71", "#3498db", "#e67e22", "#e74c3c", "#95a5a6"],
     )
@@ -575,10 +651,12 @@ def tab_price(df: pd.DataFrame):
     if _no_data(pdf):
         return
 
+    _show_metric_note()
+
     # ── Stats bar
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Thấp nhất", fmt_vnd(pdf["gia"].min(), short=True))
-    c2.metric("Trung bình", fmt_vnd(pdf["gia"].mean(), short=True))
+    c2.metric("Giá TB / ngày đi", fmt_vnd(global_weighted_avg_price(pdf), short=True))
     c3.metric("Trung vị", fmt_vnd(pdf["gia"].median(), short=True))
     c4.metric("Cao nhất", fmt_vnd(pdf["gia"].max(), short=True))
     c5.metric("SP có giá", f"{len(pdf):,} / {len(df):,}")
@@ -588,7 +666,7 @@ def tab_price(df: pd.DataFrame):
     # ── Histogram
     fig = px.histogram(
         pdf, x="gia", nbins=50,
-        title="Phân phối giá toàn thị trường",
+        title="Phân phối giá (theo sản phẩm — mỗi dòng 1 SP)",
         labels={"gia": "Giá (VND)", "count": "Số SP"},
         color_discrete_sequence=[PRIMARY],
     )
@@ -622,7 +700,10 @@ def tab_price(df: pd.DataFrame):
         st.plotly_chart(fig, use_container_width=True)
 
     # ── Box by Top Routes
-    top_r = pdf.groupby("tuyen_tour").size().nlargest(12).index
+    top_r = (
+        sum_weighted_counts(pdf, ["tuyen_tour"])
+        .nlargest(12, "so_chuyen")["tuyen_tour"]
+    )
     rdf = pdf[pdf["tuyen_tour"].isin(top_r)]
     if len(rdf) > 0:
         fig = px.box(
@@ -637,13 +718,17 @@ def tab_price(df: pd.DataFrame):
 
     # ── Price Heatmap: Company × Route
     st.subheader("🔥 Heatmap Giá TB: Công ty × Tuyến")
-    top_r_hm = pdf.groupby("tuyen_tour").size().nlargest(10).index.tolist()
-    top_c_hm = pdf.groupby("cong_ty").size().nlargest(12).index.tolist()
-    pivot = pdf.pivot_table(values="gia", index="cong_ty", columns="tuyen_tour", aggfunc="mean")
-    pivot = pivot.loc[
-        [c for c in top_c_hm if c in pivot.index],
-        [r for r in top_r_hm if r in pivot.columns],
-    ]
+    top_r_hm = (
+        sum_weighted_counts(pdf, ["tuyen_tour"])
+        .nlargest(10, "so_chuyen")["tuyen_tour"]
+        .tolist()
+    )
+    top_c_hm = (
+        sum_weighted_counts(pdf, ["cong_ty"])
+        .nlargest(12, "so_chuyen")["cong_ty"]
+        .tolist()
+    )
+    pivot = pivot_company_route(pdf, companies=top_c_hm, routes=top_r_hm)
     if not pivot.empty:
         z = (pivot.values / 1_000_000).round(2)
         text = [
@@ -670,17 +755,47 @@ def tab_price(df: pd.DataFrame):
         st.plotly_chart(fig, use_container_width=True)
 
     # ── Stats table
-    st.subheader("📋 Thống kê giá theo Tuyến Tour")
-    stats = (
-        pdf.groupby("tuyen_tour")["gia"]
-        .agg(SoSP="count", Min="min", Max="max", TrungBinh="mean", Median="median")
-        .reset_index()
-        .sort_values("SoSP", ascending=False)
-    )
-    stats.columns = ["Tuyến", "Số SP", "Giá Min", "Giá Max", "Giá TB", "Giá Median"]
-    for col in ["Giá Min", "Giá Max", "Giá TB", "Giá Median"]:
-        stats[col] = stats[col].apply(lambda x: f"{x:,.0f} ₫" if pd.notna(x) else "N/A")
-    st.dataframe(stats, use_container_width=True, hide_index=True, height=380)
+    st.subheader("📋 Thống kê giá theo Tuyến Tour (gom ô có trọng số)")
+    seg = agg_route_dep(pdf, ROUTE_DEP_COLS)
+    route_stats = rollup_route(seg) if not seg.empty else pd.DataFrame()
+    raw = pdf.groupby("tuyen_tour")["gia"].agg(Min="min", Max="max", Median="median")
+    if not route_stats.empty:
+        stats = route_stats.merge(raw, on="tuyen_tour", how="left")
+        stats = stats.rename(columns={
+            "tuyen_tour": "Tuyến",
+            "so_sp": "Số SP",
+            "so_chuyen": "Số đoàn",
+            "so_doan": "Số đoàn",
+            "so_o": "Số điểm KH",
+            "tong_ngay_di": "Tổng ngày đi",
+            "gia_tb_doan": "Giá TB / đoàn",
+            "gia_tb_ngay": "Giá TB / ngày",
+            "ngay_tb_doan": "Ngày TB / đoàn",
+            "Min": "Giá Min",
+            "Max": "Giá Max",
+            "Median": "Giá Median",
+        })
+        stats = stats.sort_values("Số đoàn", ascending=False)
+        for col in ["Giá Min", "Giá Max", "Giá TB / đoàn", "Giá TB / ngày", "Giá Median"]:
+            if col in stats.columns:
+                stats[col] = stats[col].apply(
+                    lambda x: f"{x:,.0f} ₫" if pd.notna(x) else "N/A"
+                )
+        if "Tổng ngày đi" in stats.columns:
+            stats["Tổng ngày đi"] = stats["Tổng ngày đi"].apply(
+                lambda x: f"{x:,.0f}" if pd.notna(x) else "N/A"
+            )
+        if "Ngày TB / đoàn" in stats.columns:
+            stats["Ngày TB / đoàn"] = stats["Ngày TB / đoàn"].apply(
+                lambda x: f"{x:.1f}" if pd.notna(x) else "N/A"
+            )
+        show_cols = [c for c in [
+            "Tuyến", "Số SP", "Số đoàn", "Tổng ngày đi", "Ngày TB / đoàn",
+            "Giá Min", "Giá Max", "Giá TB / đoàn", "Giá TB / ngày", "Giá Median",
+        ] if c in stats.columns]
+        st.dataframe(stats[show_cols], use_container_width=True, hide_index=True, height=380)
+    else:
+        st.info("Không đủ dữ liệu giá để thống kê theo tuyến.")
 
 
 # ── TAB 3: THỊ TRƯỜNG ────────────────────────────────────────────────────────
@@ -690,115 +805,138 @@ def tab_market(df: pd.DataFrame):
     if _no_data(df):
         return
 
+    _show_metric_note()
+
     # ── Treemap & Segment stacked bar
     c1, c2 = st.columns(2)
     with c1:
-        tm = (
-            df[df["thi_truong"].str.strip().ne("") & df["cong_ty"].str.strip().ne("")]
-            .groupby(["thi_truong", "cong_ty"])
-            .size()
-            .reset_index(name="count")
+        tm = sum_weighted_counts(
+            df[df["thi_truong"].str.strip().ne("") & df["cong_ty"].str.strip().ne("")],
+            ["thi_truong", "cong_ty"],
         )
         fig = px.treemap(
-            tm, path=["thi_truong", "cong_ty"], values="count",
-            title="Cơ cấu sản phẩm: Thị trường → Công ty",
-            color="count", color_continuous_scale="Blues",
+            tm, path=["thi_truong", "cong_ty"], values="so_chuyen",
+            title="Cơ cấu chuyến: Thị trường → Công ty",
+            color="so_chuyen", color_continuous_scale="Blues",
         )
         fig.update_layout(height=440)
         st.plotly_chart(fig, use_container_width=True)
 
     with c2:
-        seg = (
-            df[df["thi_truong"].str.strip().ne("")]
-            .groupby(["thi_truong", "phan_khuc"])
-            .size()
-            .reset_index(name="count")
+        seg = sum_weighted_counts(
+            df[df["thi_truong"].str.strip().ne("")],
+            ["thi_truong", "phan_khuc"],
         )
         fig = px.bar(
-            seg, x="thi_truong", y="count", color="phan_khuc",
+            seg, x="thi_truong", y="so_chuyen", color="phan_khuc",
             barmode="stack",
-            title="Phân khúc giá theo Thị trường",
-            labels={"thi_truong": "Thị trường", "count": "Số SP", "phan_khuc": "Phân khúc"},
+            title="Phân khúc giá theo Thị trường (theo chuyến)",
+            labels={"thi_truong": "Thị trường", "so_chuyen": "Số chuyến", "phan_khuc": "Phân khúc"},
             category_orders={"phan_khuc": SEGMENT_ORDER},
         )
         fig.update_layout(height=440, xaxis_tickangle=-30)
         st.plotly_chart(fig, use_container_width=True)
 
     # ── Duration structure by company
-    dur = df.dropna(subset=["so_ngay"]).copy()
+    dur = df[df["nhom_thoi_gian"].ne("Không xác định")].copy()
     if len(dur) > 0:
-        dur["nhom_tg"] = dur["so_ngay"].apply(
-            lambda x: "Nửa ngày (≤0.5)" if x <= 0.5
-            else "1 ngày" if x <= 1
-            else "2–3 ngày" if x <= 3
-            else "4+ ngày"
+        top_co = (
+            sum_weighted_counts(df, ["cong_ty"])
+            .nlargest(12, "so_chuyen")["cong_ty"]
         )
-        top_co = df.groupby("cong_ty").size().nlargest(12).index
-        dur_agg = (
-            dur[dur["cong_ty"].isin(top_co)]
-            .groupby(["cong_ty", "nhom_tg"])
-            .size()
-            .reset_index(name="count")
+        dur_agg = sum_weighted_counts(
+            dur[dur["cong_ty"].isin(top_co)],
+            ["cong_ty", "nhom_thoi_gian"],
         )
         fig = px.bar(
-            dur_agg, x="cong_ty", y="count", color="nhom_tg", barmode="stack",
-            title="Cơ cấu sản phẩm theo Thời gian chuyến (Top 12 Công ty)",
-            labels={"cong_ty": "Công ty", "count": "Số SP", "nhom_tg": "Thời gian"},
-            category_orders={"nhom_tg": ["Nửa ngày (≤0.5)", "1 ngày", "2–3 ngày", "4+ ngày"]},
+            dur_agg, x="cong_ty", y="so_chuyen", color="nhom_thoi_gian", barmode="stack",
+            title="Cơ cấu chuyến theo Thời gian (Top 12 Công ty)",
+            labels={"cong_ty": "Công ty", "so_chuyen": "Số chuyến", "nhom_thoi_gian": "Nhóm ngày"},
+            category_orders={"nhom_thoi_gian": NHOM_THOI_ORDER},
         )
         fig.update_layout(height=380, xaxis_tickangle=-35)
         st.plotly_chart(fig, use_container_width=True)
 
-    # ── Avg price by company × market
+    # ── Avg price by company × market (ô → gom thị trường vùng)
     pdf = df.dropna(subset=["gia"])
     if len(pdf) > 0:
-        top_co2 = pdf.groupby("cong_ty").size().nlargest(10).index
-        avg_p = (
-            pdf[pdf["cong_ty"].isin(top_co2) & pdf["thi_truong"].str.strip().ne("")]
-            .groupby(["cong_ty", "thi_truong"])["gia"]
-            .mean()
-            .reset_index()
+        top_co2 = (
+            sum_weighted_counts(pdf, ["cong_ty"])
+            .nlargest(10, "so_chuyen")["cong_ty"]
         )
-        avg_p["gia_m"] = avg_p["gia"] / 1_000_000
-        fig = px.bar(
-            avg_p, x="cong_ty", y="gia_m", color="thi_truong", barmode="group",
-            title="Giá TB theo Công ty × Thị trường (triệu ₫)",
-            labels={"cong_ty": "Công ty", "gia_m": "Giá TB (tr ₫)", "thi_truong": "Thị trường"},
-        )
-        fig.update_layout(height=380, xaxis_tickangle=-35)
-        st.plotly_chart(fig, use_container_width=True)
+        parts = []
+        for co in top_co2:
+            sub = pdf[(pdf["cong_ty"] == co) & pdf["thi_truong"].str.strip().ne("")]
+            for mkt, g in sub.groupby("thi_truong"):
+                seg = agg_route_dep(g, ROUTE_DEP_COLS)
+                rolled = rollup_route(seg)
+                if rolled.empty:
+                    continue
+                val = rolled["gia_tb_ngay"].iloc[0]
+                if pd.isna(val):
+                    val = rolled["gia_tb_doan"].iloc[0]
+                parts.append({
+                    "cong_ty": co,
+                    "thi_truong": mkt,
+                    "gia_tb": val,
+                })
+        avg_p = pd.DataFrame(parts)
+        if not avg_p.empty:
+            avg_p["gia_m"] = avg_p["gia_tb"] / 1_000_000
+            fig = px.bar(
+                avg_p, x="cong_ty", y="gia_m", color="thi_truong", barmode="group",
+                title="Giá TB / ngày theo Công ty × Thị trường (triệu ₫)",
+                labels={"cong_ty": "Công ty", "gia_m": "Giá TB (tr ₫)", "thi_truong": "Thị trường"},
+            )
+            fig.update_layout(height=380, xaxis_tickangle=-35)
+            st.plotly_chart(fig, use_container_width=True)
 
     # ── Departure city breakdown
     dep = (
-        df[df["diem_kh_clean"].ne("Không xác định")]
-        .groupby("diem_kh_clean").size()
-        .reset_index(name="count")
-        .sort_values("count", ascending=False)
+        sum_weighted_counts(
+            df[df["diem_kh_clean"].ne("Không xác định")],
+            ["diem_kh_clean"],
+        )
+        .sort_values("so_chuyen", ascending=False)
     )
     if len(dep) > 0:
         fig = px.bar(
-            dep, x="diem_kh_clean", y="count",
-            title="Phân bổ sản phẩm theo Điểm khởi hành",
-            labels={"diem_kh_clean": "Điểm khởi hành", "count": "Số SP"},
-            color="count", color_continuous_scale="Teal",
+            dep, x="diem_kh_clean", y="so_chuyen",
+            title="Phân bổ chuyến theo Điểm khởi hành",
+            labels={"diem_kh_clean": "Điểm khởi hành", "so_chuyen": "Số chuyến"},
+            color="so_chuyen", color_continuous_scale="Teal",
         )
         fig.update_layout(showlegend=False, height=300, coloraxis_showscale=False)
         st.plotly_chart(fig, use_container_width=True)
 
     # ── Route count by market (bubble)
-    rt_mkt = (
-        df[df["thi_truong"].str.strip().ne("") & df["tuyen_tour"].str.strip().ne("")]
-        .groupby(["thi_truong", "tuyen_tour"])
-        .agg(so_sp=("ten_tour", "count"), gia_tb=("gia", "mean"))
-        .reset_index()
-    )
+    sub_rt = df[
+        df["thi_truong"].str.strip().ne("") & df["tuyen_tour"].str.strip().ne("")
+    ].dropna(subset=["gia"])
+    rt_parts = []
+    for (mkt, route), g in sub_rt.groupby(["thi_truong", "tuyen_tour"]):
+        seg = agg_route_dep(g, ROUTE_DEP_COLS)
+        rolled = rollup_route(seg)
+        if rolled.empty:
+            continue
+        gia = rolled["gia_tb_ngay"].iloc[0]
+        if pd.isna(gia):
+            gia = rolled["gia_tb_doan"].iloc[0]
+        rt_parts.append({
+            "thi_truong": mkt,
+            "tuyen_tour": route,
+            "gia_tb": gia,
+            "so_chuyen": rolled["so_doan"].iloc[0],
+            "so_sp": rolled["so_sp"].iloc[0],
+        })
+    rt_mkt = pd.DataFrame(rt_parts)
     if len(rt_mkt) > 0 and rt_mkt["gia_tb"].notna().sum() > 0:
         fig = px.scatter(
             rt_mkt.dropna(subset=["gia_tb"]),
             x="thi_truong", y="gia_tb",
-            size="so_sp", color="thi_truong",
-            hover_data={"tuyen_tour": True, "so_sp": True, "gia_tb": ":,.0f"},
-            title="Tuyến Tour: Giá TB vs Số SP (kích thước = số sản phẩm)",
+            size="so_chuyen", color="thi_truong",
+            hover_data={"tuyen_tour": True, "so_sp": True, "so_chuyen": True, "gia_tb": ":,.0f"},
+            title="Tuyến Tour: Giá TB vs Số chuyến (kích thước = chuyến có trọng số)",
             labels={"thi_truong": "Thị trường", "gia_tb": "Giá TB (VND)"},
         )
         fig.update_yaxes(tickformat=",")
@@ -813,6 +951,8 @@ def tab_competitor(df: pd.DataFrame):
     if _no_data(df):
         return
 
+    _show_metric_note()
+
     companies = sorted(df["cong_ty"].replace("", pd.NA).dropna().unique().tolist())
     if not companies:
         empty_state("Không có dữ liệu công ty.")
@@ -822,13 +962,14 @@ def tab_competitor(df: pd.DataFrame):
     cdf = df[df["cong_ty"] == sel].copy()
 
     # ── Metrics
-    c1, c2, c3, c4, c5 = st.columns(5)
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
     c1.metric("Sản phẩm", len(cdf))
-    c2.metric("Tuyến", cdf["tuyen_tour"].nunique())
-    c3.metric("Thị trường", cdf["thi_truong"].nunique())
+    c2.metric("Chuyến (TT)", f"{cdf['trip_weight'].sum():,.0f}")
+    c3.metric("Tuyến", cdf["tuyen_tour"].nunique())
+    c4.metric("Thị trường", cdf["thi_truong"].nunique())
     pdata = cdf["gia"].dropna()
-    c4.metric("Giá min", fmt_vnd(pdata.min(), short=True) if len(pdata) > 0 else "N/A")
-    c5.metric("Giá max", fmt_vnd(pdata.max(), short=True) if len(pdata) > 0 else "N/A")
+    c5.metric("Giá min", fmt_vnd(pdata.min(), short=True) if len(pdata) > 0 else "N/A")
+    c6.metric("Giá max", fmt_vnd(pdata.max(), short=True) if len(pdata) > 0 else "N/A")
 
     st.divider()
 
@@ -836,40 +977,34 @@ def tab_competitor(df: pd.DataFrame):
     col1, col2 = st.columns(2)
     with col1:
         rc = (
-            cdf[cdf["tuyen_tour"].str.strip().ne("")]
-            .groupby("tuyen_tour").size()
-            .reset_index(name="count")
-            .sort_values("count")
+            sum_weighted_counts(
+                cdf[cdf["tuyen_tour"].str.strip().ne("")], ["tuyen_tour"]
+            )
+            .sort_values("so_chuyen")
         )
         fig = px.bar(
-            rc, x="count", y="tuyen_tour", orientation="h",
-            title=f"Sản phẩm theo Tuyến — {sel}",
-            labels={"count": "Số SP", "tuyen_tour": "Tuyến"},
-            color="count", color_continuous_scale="Blues",
+            rc, x="so_chuyen", y="tuyen_tour", orientation="h",
+            title=f"Chuyến theo Tuyến — {sel}",
+            labels={"so_chuyen": "Số chuyến", "tuyen_tour": "Tuyến"},
+            color="so_chuyen", color_continuous_scale="Blues",
         )
         fig.update_layout(showlegend=False, height=360, coloraxis_showscale=False)
         st.plotly_chart(fig, use_container_width=True)
 
     with col2:
-        sc = cdf.groupby("phan_khuc").size().reset_index(name="count")
+        sc = sum_weighted_counts(cdf, ["phan_khuc"])
         fig = px.pie(
-            sc, values="count", names="phan_khuc",
+            sc, values="so_chuyen", names="phan_khuc",
             title=f"Phân khúc giá — {sel}",
             hole=0.45, color_discrete_sequence=px.colors.qualitative.Set2,
         )
         fig.update_layout(height=360)
         st.plotly_chart(fig, use_container_width=True)
 
-    # ── Price positioning vs route market average
-    all_pdf = df.dropna(subset=["gia"])
-    comp_pdf = cdf.dropna(subset=["gia"]).copy()
-    if len(comp_pdf) > 0 and len(all_pdf) > 0:
-        route_avg = all_pdf.groupby("tuyen_tour")["gia"].mean()
-        comp_pdf["route_avg"] = comp_pdf["tuyen_tour"].map(route_avg)
-        comp_pdf = comp_pdf.dropna(subset=["route_avg"])
-        comp_pdf["vs_pct"] = (
-            (comp_pdf["gia"] - comp_pdf["route_avg"]) / comp_pdf["route_avg"] * 100
-        )
+    # ── Price positioning vs TB thị trường trong ô (tuyến × điểm KH × nhóm ngày)
+    comp_pdf = _benchmark_company_rows(cdf, df, exclude_company=sel)
+    comp_pdf = comp_pdf.dropna(subset=["vs_pct"])
+    if len(comp_pdf) > 0:
         comp_pdf["cat"] = comp_pdf["vs_pct"].apply(
             lambda x: "Rẻ hơn TB >10%" if x < -10
             else "Đắt hơn TB >10%" if x > 10
@@ -883,9 +1018,15 @@ def tab_competitor(df: pd.DataFrame):
         fig = px.scatter(
             comp_pdf, x="tuyen_tour", y="vs_pct", color="cat",
             color_discrete_map=CLR,
-            hover_data={"ten_tour": True, "gia": ":,.0f", "route_avg": ":,.0f"},
-            title=f"Định vị giá so với Giá TB tuyến — {sel}",
-            labels={"tuyen_tour": "Tuyến", "vs_pct": "% so với giá TB tuyến", "cat": ""},
+            hover_data={
+                "ten_tour": True,
+                "gia": ":,.0f",
+                "gia_tb_o": ":,.0f",
+                "diem_kh_clean": True,
+                "nhom_thoi_gian": True,
+            },
+            title=f"Định vị giá vs TB thị trường trong ô — {sel}",
+            labels={"tuyen_tour": "Tuyến", "vs_pct": "% so với TB ô", "cat": ""},
         )
         fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.6)
         fig.add_hline(y=10, line_dash="dot", line_color="#dc3545", opacity=0.4)
@@ -893,40 +1034,79 @@ def tab_competitor(df: pd.DataFrame):
         fig.update_layout(height=380, xaxis_tickangle=-30)
         st.plotly_chart(fig, use_container_width=True)
 
-    # ── Comparison table: this company vs market by route
-    if len(all_pdf) > 0 and len(comp_pdf) > 0:
-        shared = list(set(cdf["tuyen_tour"].unique()) & set(all_pdf["tuyen_tour"].unique()))
-        if shared:
-            comp_avgs = cdf.dropna(subset=["gia"]).groupby("tuyen_tour")["gia"].mean()
-            mkt_avgs = all_pdf.groupby("tuyen_tour")["gia"].mean()
-            rows = []
-            for r in shared:
-                ca = comp_avgs.get(r, np.nan)
-                ma = mkt_avgs.get(r, np.nan)
-                if pd.notna(ca) and pd.notna(ma):
-                    rows.append({
-                        "Tuyến": r,
-                        f"Giá TB {sel}": f"{ca:,.0f} ₫",
-                        "Giá TB Thị trường": f"{ma:,.0f} ₫",
-                        "Chênh lệch": f"{(ca - ma) / ma * 100:+.1f}%",
-                    })
-            if rows:
-                st.subheader(f"📊 So sánh giá TB theo Tuyến — {sel} vs Thị trường")
-                st.dataframe(
-                    pd.DataFrame(rows).sort_values("Tuyến"),
-                    use_container_width=True, hide_index=True,
+    route_tbl, seg_tbl = compare_company_vs_market(df, sel)
+    if not route_tbl.empty:
+        st.subheader(f"📊 So sánh giá — {sel} vs Thị trường")
+        raw = route_tbl[
+            route_tbl["diem_kh_clean"].ne("Không xác định")
+            & route_tbl["thi_truong"].astype(str).str.strip().ne("")
+        ].copy()
+        st.caption(
+            "Giá TB = Giá TB/ngày × **Ngày TB/đoàn (công ty)**; "
+            "TT dùng cùng số ngày của công ty để so sánh công bằng."
+        )
+        disp = pd.DataFrame({
+            "Đầu khởi hành": raw["diem_kh_clean"],
+            "Thị trường": raw["thi_truong"],
+            "Tuyến Tour": raw["tuyen_tour"],
+            f"Giá TB {sel}": raw["gia_cmp_co"],
+            "Giá TB TT": raw["gia_cmp_tt"],
+            "Chênh lệch %": raw["chenh_pct"],
+        })
+        disp[f"Giá TB {sel}"] = disp[f"Giá TB {sel}"].apply(
+            lambda x: f"{x:,.0f} ₫" if pd.notna(x) else "N/A"
+        )
+        disp["Giá TB TT"] = disp["Giá TB TT"].apply(
+            lambda x: f"{x:,.0f} ₫" if pd.notna(x) else "N/A"
+        )
+        disp["Chênh lệch %"] = disp["Chênh lệch %"].apply(
+            lambda x: f"{x:+.1f}%" if pd.notna(x) else "N/A"
+        )
+        st.dataframe(
+            disp.sort_values(["Thị trường", "Tuyến Tour", "Đầu khởi hành"]),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    if not seg_tbl.empty:
+        with st.expander("Chi tiết theo ô (Tuyến × Điểm KH × Nhóm ngày)"):
+            sd = seg_tbl.copy()
+            sd = sd.rename(columns={
+                "tuyen_tour": "Tuyến",
+                "diem_kh_clean": "Điểm KH",
+                "nhom_thoi_gian": "Nhóm ngày",
+                "gia_tb_co": f"Giá TB {sel}",
+                "gia_tb_tt": "Giá TB TT",
+                "chenh_pct": "Chênh lệch %",
+            })
+            for col in sd.columns:
+                if "gia_tb" in col:
+                    sd[col] = sd[col].apply(
+                        lambda x: f"{x:,.0f} ₫" if pd.notna(x) else "—"
+                    )
+                elif "ngay_tb" in col:
+                    sd[col] = sd[col].apply(
+                        lambda x: f"{x:.1f}" if pd.notna(x) else "—"
+                    )
+            if "Chênh lệch %" in sd.columns:
+                sd["Chênh lệch %"] = sd["Chênh lệch %"].apply(
+                    lambda x: f"{x:+.1f}%" if pd.notna(x) else "—"
                 )
+            st.dataframe(sd, use_container_width=True, hide_index=True, height=320)
 
     # ── All products table
     st.subheader(f"📋 Tất cả sản phẩm của {sel} ({len(cdf)})")
-    show_cols = ["ten_tour", "thi_truong", "tuyen_tour", "diem_kh_clean",
-                 "thoi_gian", "gia", "lich_kh", "phan_khuc"]
+    show_cols = [
+        "ten_tour", "thi_truong", "tuyen_tour", "diem_kh_clean", "nhom_thoi_gian",
+        "thoi_gian", "gia", "so_doan", "ngay_di", "lich_kh", "phan_khuc",
+    ]
     show = cdf[[c for c in show_cols if c in cdf.columns]].copy()
     show["gia"] = show["gia"].apply(lambda x: f"{x:,.0f} ₫" if pd.notna(x) else "N/A")
     col_map = {
         "ten_tour": "Tên Tour", "thi_truong": "Thị trường", "tuyen_tour": "Tuyến",
-        "diem_kh_clean": "Điểm KH", "thoi_gian": "Thời gian",
-        "gia": "Giá", "lich_kh": "Lịch KH", "phan_khuc": "Phân khúc",
+        "diem_kh_clean": "Điểm KH", "nhom_thoi_gian": "Nhóm ngày", "thoi_gian": "Thời gian",
+        "gia": "Giá", "so_doan": "Số đoàn", "ngay_di": "Ngày×đoàn", "lich_kh": "Lịch KH",
+        "phan_khuc": "Phân khúc",
     }
     show = show.rename(columns=col_map)
     col_cfg = {}
@@ -1189,6 +1369,26 @@ def tab_vietravel_sync():
             "💾 Quét & Lưu lên Google Sheet",
             type="primary",
             use_container_width=True,
+        )
+
+    with st.expander("⚙️ Cấu hình Google Service Account"):
+        st.markdown(
+            """
+1. Vào [Google Cloud Console](https://console.cloud.google.com/) → tạo project → bật **Google Sheets API**.
+2. Tạo **Service Account** → tải file JSON key → đặt tên `credentials.json` cạnh `streamlit_app.py`.
+3. Mở Google Sheet → **Chia sẻ** → thêm email Service Account (dạng `xxx@xxx.iam.gserviceaccount.com`) quyền **Editor**.
+4. (Streamlit Cloud) Dán nội dung JSON vào `.streamlit/secrets.toml`:
+
+```toml
+[gcp_service_account]
+type = "service_account"
+project_id = "..."
+private_key_id = "..."
+private_key = "-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----\\n"
+client_email = "..."
+client_id = "..."
+```
+            """
         )
 
     if preview_only or sync_sheet:

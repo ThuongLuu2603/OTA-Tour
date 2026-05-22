@@ -20,6 +20,8 @@ Dữ liệu đọc trực tiếp từ Google Sheets (public) — không cần AP
 
 **Sidebar filters:** Thị trường · Công ty · Tuyến · Điểm khởi hành · Loại lịch · Khoảng giá
 
+**Giá TB & số đoàn (toàn app):** `market_metrics.py` — mỗi dòng so sánh **Tuyến × Điểm khởi hành**. **Giá TB/đoàn** = Σ(giá×đoàn)/Σ(đoàn); **Giá TB/ngày** = Σ(giá×đoàn)/Σ(ngày×đoàn); **Ngày TB/đoàn** = Σ(ngày×đoàn)/Σ(đoàn). Số đoàn = trọng số lịch KH. Chênh lệch % mặc định theo giá/ngày.
+
 ---
 
 ## Quét tour Vietravel (travel.com.vn)
