@@ -15,8 +15,38 @@ Dữ liệu đọc trực tiếp từ Google Sheets (public) — không cần AP
 | 🏢 **Đối Thủ** | Profile công ty · Định vị giá vs giá TB tuyến · Bảng so sánh · Danh sách sản phẩm |
 | 📅 **Lịch KH** | Calendar heatmap 120 ngày · Lịch theo tháng × thị trường · Ngày trong tuần · Danh sách chuyến sắp tới |
 | 📋 **Dữ Liệu** | Bảng đầy đủ với link clickable · Export CSV & Excel |
+| 🔄 **Vietravel** | Quét tour từ travel.com.vn · Lưu vào tab Vietravel trên Google Sheet |
 
 **Sidebar filters:** Thị trường · Công ty · Tuyến · Điểm khởi hành · Loại lịch · Khoảng giá
+
+---
+
+## Quét tour Vietravel (travel.com.vn)
+
+App tự động quét 2 trang:
+
+- https://travel.com.vn/du-lich-viet-nam.aspx (trong nước)
+- https://travel.com.vn/du-lich-nuoc-ngoai.aspx (nước ngoài)
+
+Và ghi vào tab **Vietravel** trên Google Sheet:  
+`gid=620817544` trong file [OTA Sheet](https://docs.google.com/spreadsheets/d/1sI34D88zsmSrN7Jf9fS3jh4aUvaep-blxnBR1CGq9eM/edit#gid=620817544)
+
+### Cấu hình Google Service Account (bắt buộc để ghi Sheet)
+
+1. Google Cloud Console → bật **Google Sheets API**
+2. Tạo Service Account → tải JSON → lưu `credentials.json` cạnh `streamlit_app.py`
+3. Chia sẻ Google Sheet cho email Service Account (quyền **Editor**)
+4. Streamlit Cloud: copy JSON vào `.streamlit/secrets.toml` (xem `secrets.toml.example`)
+
+### Chạy từ app hoặc CLI
+
+**Trong app:** Tab **🔄 Vietravel** → *Quét thử* hoặc *Quét & Lưu lên Google Sheet*
+
+**CLI:**
+```bash
+python sync_vietravel.py --preview   # chỉ xem số lượng tour quét được
+python sync_vietravel.py             # quét + ghi Sheet
+```
 
 ---
 
@@ -78,10 +108,14 @@ App sẽ có URL dạng:
 
 ```
 ota-dashboard/
-├── streamlit_app.py       # App chính (single-file, multi-tab)
-├── requirements.txt       # Python dependencies
+├── streamlit_app.py       # App chính (multi-tab)
+├── vietravel_scraper.py   # Quét travel.com.vn + ghi Google Sheet
+├── sync_vietravel.py      # CLI đồng bộ Vietravel
+├── requirements.txt
+├── credentials.json       # (tự tạo) Google Service Account key
 ├── .streamlit/
-│   └── config.toml        # Theme màu navy #003580, layout wide
+│   ├── config.toml
+│   └── secrets.toml.example
 └── README.md
 ```
 

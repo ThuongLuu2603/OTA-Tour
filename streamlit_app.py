@@ -1067,6 +1067,106 @@ def tab_data(df: pd.DataFrame):
                  height=620, column_config=col_cfg)
 
 
+# ── TAB 7: VIETRAVEL SYNC ─────────────────────────────────────────────────────
+
+
+def tab_vietravel_sync():
+    st.subheader("🔄 Quét tour Vietravel → Google Sheets")
+    st.caption(
+        "Nguồn: [Du lịch trong nước](https://travel.com.vn/du-lich-viet-nam.aspx) · "
+        "[Du lịch nước ngoài](https://travel.com.vn/du-lich-nuoc-ngoai.aspx) → "
+        f"[Sheet Vietravel](https://docs.google.com/spreadsheets/d/{SHEET_ID}/edit#gid=620817544)"
+    )
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        preview_only = st.button("🔍 Quét thử (xem trước)", use_container_width=True)
+    with col_b:
+        sync_sheet = st.button(
+            "💾 Quét & Lưu lên Google Sheet",
+            type="primary",
+            use_container_width=True,
+        )
+
+    with st.expander("⚙️ Cấu hình Google Service Account"):
+        st.markdown(
+            """
+1. Vào [Google Cloud Console](https://console.cloud.google.com/) → tạo project → bật **Google Sheets API**.
+2. Tạo **Service Account** → tải file JSON key → đặt tên `credentials.json` cạnh `streamlit_app.py`.
+3. Mở Google Sheet → **Chia sẻ** → thêm email Service Account (dạng `xxx@xxx.iam.gserviceaccount.com`) quyền **Editor**.
+4. (Streamlit Cloud) Dán nội dung JSON vào `.streamlit/secrets.toml`:
+
+```toml
+[gcp_service_account]
+type = "service_account"
+project_id = "..."
+private_key_id = "..."
+private_key = "-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----\\n"
+client_email = "..."
+client_id = "..."
+```
+            """
+        )
+
+    if preview_only or sync_sheet:
+        with st.spinner("Đang quét travel.com.vn (trong nước + nước ngoài)..."):
+            try:
+                from vietravel_scraper import scrape_all_vietravel_tours, write_to_google_sheet
+
+                vdf = scrape_all_vietravel_tours()
+            except Exception as exc:
+                st.error(f"Lỗi khi quét: {exc}")
+                return
+
+        if vdf.empty:
+            st.warning("Không quét được tour nào. Vui lòng thử lại sau.")
+            return
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Tổng tour", len(vdf))
+        c2.metric("Trong nước", int((vdf["thi_truong"] == "Du lịch trong nước").sum()))
+        c3.metric("Nước ngoài", int((vdf["thi_truong"] == "Du lịch nước ngoài").sum()))
+
+        show = vdf[
+            ["ten_tour", "thi_truong", "diem_kh", "thoi_gian", "gia", "lich_kh", "link_url"]
+        ].rename(
+            columns={
+                "ten_tour": "Tên Tour",
+                "thi_truong": "Thị trường",
+                "diem_kh": "Điểm KH",
+                "thoi_gian": "Thời gian",
+                "gia": "Giá",
+                "lich_kh": "Lịch KH",
+                "link_url": "Link",
+            }
+        )
+        st.dataframe(
+            show,
+            use_container_width=True,
+            hide_index=True,
+            height=400,
+            column_config={
+                "Link": st.column_config.LinkColumn("Link", display_text="🔗 Xem"),
+            },
+        )
+
+        if sync_sheet:
+            with st.spinner("Đang ghi dữ liệu lên Google Sheet..."):
+                try:
+                    meta = write_to_google_sheet(vdf)
+                    meta["tours_scraped"] = len(vdf)
+                    st.success(
+                        f"Đã lưu **{meta['rows_written']}** tour vào sheet "
+                        f"**{meta['sheet_title']}** (gid={meta['gid']})."
+                    )
+                    st.json(meta)
+                    st.cache_data.clear()
+                except FileNotFoundError as exc:
+                    st.error(str(exc))
+                except Exception as exc:
+                    st.error(f"Lỗi ghi Sheet: {exc}")
+
+
 # ── MAIN ──────────────────────────────────────────────────────────────────────
 
 
@@ -1139,13 +1239,14 @@ def main():
     fdf = render_sidebar(df)
 
     # ── Tabs
-    t1, t2, t3, t4, t5, t6 = st.tabs([
+    t1, t2, t3, t4, t5, t6, t7 = st.tabs([
         "📊 Tổng Quan",
         "💰 Phân Tích Giá",
         "🗺️ Thị Trường",
         "🏢 Đối Thủ",
         "📅 Lịch Khởi Hành",
         "📋 Dữ Liệu",
+        "🔄 Vietravel",
     ])
 
     with t1:
@@ -1160,6 +1261,8 @@ def main():
         tab_schedule(fdf)
     with t6:
         tab_data(fdf)
+    with t7:
+        tab_vietravel_sync()
 
 
 if __name__ == "__main__":
