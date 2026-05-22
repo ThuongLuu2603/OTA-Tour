@@ -18,6 +18,7 @@ import streamlit as st
 SHEET_ID = "1sI34D88zsmSrN7Jf9fS3jh4aUvaep-blxnBR1CGq9eM"
 GID = "1729132868"
 GID_VIETRAVEL = "620817544"
+GID_FINDTOURGO = "408521834"
 CSV_URL = (
     f"https://docs.google.com/spreadsheets/d/{SHEET_ID}"
     f"/export?format=csv&gid={GID}"
@@ -25,6 +26,10 @@ CSV_URL = (
 CSV_URL_VIETRAVEL = (
     f"https://docs.google.com/spreadsheets/d/{SHEET_ID}"
     f"/export?format=csv&gid={GID_VIETRAVEL}"
+)
+CSV_URL_FINDTOURGO = (
+    f"https://docs.google.com/spreadsheets/d/{SHEET_ID}"
+    f"/export?format=csv&gid={GID_FINDTOURGO}"
 )
 
 PAGES = [
@@ -35,6 +40,7 @@ PAGES = [
     "📅 Lịch Khởi Hành",
     "📋 Dữ Liệu",
     "🔄 Vietravel",
+    "🌐 FindTourGo",
 ]
 
 PRIMARY = "#003580"
@@ -241,6 +247,53 @@ def load_vietravel_sheet() -> pd.DataFrame:
     except Exception:
         return pd.DataFrame()
     return df.fillna("")
+
+
+@st.cache_data(ttl=300, show_spinner="Đang tải sheet FindTourGo...")
+def load_findtourgo_sheet() -> pd.DataFrame:
+    try:
+        df = pd.read_csv(CSV_URL_FINDTOURGO, header=0, dtype=str)
+    except Exception:
+        return pd.DataFrame()
+    return df.fillna("")
+
+
+def _sheet_view_with_link_column(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    """
+    Hiển thị bảng Sheet giống tab Dữ liệu: cột Link clickable (🔗 Xem),
+    dùng URL thô (cột Link / Link thô), không hiện text 'Xem chi tiết' từ công thức Sheet.
+    """
+    if df.empty:
+        return df, {}
+
+    out = df.copy()
+    raw_col = None
+    for name in ("Link thô", "Link", "link_url"):
+        if name in out.columns:
+            raw_col = name
+            break
+
+    if raw_col:
+        urls = out[raw_col].astype(str).str.strip()
+        urls = urls.where(urls.str.startswith("http"), "")
+        out["Link"] = urls
+        drop_cols = []
+        if "Link tour" in out.columns:
+            drop_cols.append("Link tour")
+        if raw_col != "Link" and raw_col in out.columns:
+            drop_cols.append(raw_col)
+        out = out.drop(columns=drop_cols, errors="ignore")
+
+    unnamed = [c for c in out.columns if str(c).startswith("Unnamed")]
+    if unnamed:
+        out = out.drop(columns=unnamed, errors="ignore")
+
+    col_cfg = {}
+    if "Link" in out.columns:
+        col_cfg["Link"] = st.column_config.LinkColumn(
+            "Link Tour", display_text="🔗 Xem"
+        )
+    return out, col_cfg
 
 
 def _transform(raw: pd.DataFrame) -> pd.DataFrame:
@@ -1112,13 +1165,10 @@ def tab_vietravel_sync():
 
     sheet_df = load_vietravel_sheet()
     if not sheet_df.empty:
-        st.markdown("#### Dữ liệu trên Google Sheet (cột Z = link thô cho app)")
-        link_col = "Link" if "Link" in sheet_df.columns else None
-        col_cfg = {}
-        if link_col:
-            col_cfg[link_col] = st.column_config.LinkColumn("Link", display_text="🔗 Xem")
+        st.markdown("#### Dữ liệu trên Google Sheet")
+        view_df, col_cfg = _sheet_view_with_link_column(sheet_df)
         st.dataframe(
-            sheet_df,
+            view_df,
             use_container_width=True,
             hide_index=True,
             height=360,
@@ -1139,26 +1189,6 @@ def tab_vietravel_sync():
             "💾 Quét & Lưu lên Google Sheet",
             type="primary",
             use_container_width=True,
-        )
-
-    with st.expander("⚙️ Cấu hình Google Service Account"):
-        st.markdown(
-            """
-1. Vào [Google Cloud Console](https://console.cloud.google.com/) → tạo project → bật **Google Sheets API**.
-2. Tạo **Service Account** → tải file JSON key → đặt tên `credentials.json` cạnh `streamlit_app.py`.
-3. Mở Google Sheet → **Chia sẻ** → thêm email Service Account (dạng `xxx@xxx.iam.gserviceaccount.com`) quyền **Editor**.
-4. (Streamlit Cloud) Dán nội dung JSON vào `.streamlit/secrets.toml`:
-
-```toml
-[gcp_service_account]
-type = "service_account"
-project_id = "..."
-private_key_id = "..."
-private_key = "-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----\\n"
-client_email = "..."
-client_id = "..."
-```
-            """
         )
 
     if preview_only or sync_sheet:
@@ -1215,6 +1245,140 @@ client_id = "..."
                     st.cache_data.clear()
                     load_vietravel_sheet.clear()
                     _cached_scrape_vietravel.clear()
+                    st.rerun()
+                except FileNotFoundError as exc:
+                    st.error(str(exc))
+                except Exception as exc:
+                    st.error(f"Lỗi ghi Sheet: {exc}")
+
+
+# ── TAB 8: FINDTOURGO SYNC ────────────────────────────────────────────────────
+
+
+@st.cache_data(ttl=600, show_spinner="Đang quét FindTourGo (mọi quốc gia, ~1–2 phút)...")
+def _cached_scrape_findtourgo() -> pd.DataFrame:
+    from findtourgo_scraper import scrape_all_findtourgo_tours
+
+    return scrape_all_findtourgo_tours()
+
+
+def tab_findtourgo_sync():
+    st.subheader("🌐 FindTourGo — OTA aggregator")
+    st.caption(
+        "Nguồn: [findtourgo.com](https://findtourgo.com/vi) — quét **toàn bộ quốc gia** có tour trên OTA → "
+        f"[Sheet FindTourGo](https://docs.google.com/spreadsheets/d/{SHEET_ID}/edit#gid={GID_FINDTOURGO})"
+    )
+    st.info(
+        "Mỗi tour có **công ty lữ hành** riêng (VNA Travel, BestPrice, …). "
+        "Lưu Sheet sẽ **ghi đè toàn bộ tab** bằng dữ liệu quét mới nhất."
+    )
+
+    sheet_df = load_findtourgo_sheet()
+    if not sheet_df.empty:
+        st.markdown("#### Dữ liệu trên Google Sheet")
+        view_df, col_cfg = _sheet_view_with_link_column(sheet_df)
+        st.dataframe(
+            view_df,
+            use_container_width=True,
+            hide_index=True,
+            height=360,
+            column_config=col_cfg,
+        )
+        n_co = sheet_df["Công ty lữ hành"].nunique() if "Công ty lữ hành" in sheet_df.columns else "—"
+        st.caption(f"**{len(sheet_df)}** dòng · **{n_co}** công ty lữ hành trên Sheet.")
+    else:
+        st.info("Sheet FindTourGo đang trống. Bấm **Quét & Lưu** để đồng bộ lần đầu.")
+
+    st.divider()
+    st.markdown("#### Đồng bộ từ findtourgo.com")
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        preview_only = st.button("🔍 Quét thử (xem trước)", key="ftg_preview", use_container_width=True)
+    with col_b:
+        sync_sheet = st.button(
+            "💾 Quét & Lưu lên Google Sheet",
+            key="ftg_sync",
+            type="primary",
+            use_container_width=True,
+        )
+
+    merge_old = st.checkbox(
+        "Merge với dữ liệu cũ (giữ tour không trùng mã)",
+        value=False,
+        help="Mặc định: ghi đè toàn bộ tab FindTourGo sau khi quét.",
+    )
+
+    if preview_only or sync_sheet:
+        try:
+            from findtourgo_scraper import write_to_google_sheet
+
+            fdf = _cached_scrape_findtourgo()
+        except Exception as exc:
+            st.error(f"Lỗi khi quét: {exc}")
+            return
+
+        if fdf.empty:
+            st.warning("Không quét được tour nào. Vui lòng thử lại sau.")
+            return
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Tổng tour", len(fdf))
+        c2.metric("Công ty LH", fdf["cong_ty"].nunique())
+        c3.metric("Tuyến tour", fdf["tuyen_tour"].nunique())
+
+        show = fdf[
+            [
+                "ten_tour",
+                "thi_truong",
+                "tuyen_tour",
+                "cong_ty",
+                "diem_kh",
+                "thoi_gian",
+                "gia",
+                "lich_kh",
+                "link_url",
+            ]
+        ].rename(
+            columns={
+                "ten_tour": "Tên Tour",
+                "thi_truong": "Thị trường",
+                "tuyen_tour": "Tuyến tour",
+                "cong_ty": "Công ty",
+                "diem_kh": "Điểm KH",
+                "thoi_gian": "Thời gian",
+                "gia": "Giá",
+                "lich_kh": "Lịch KH",
+                "link_url": "Link",
+            }
+        )
+        st.dataframe(
+            show,
+            use_container_width=True,
+            hide_index=True,
+            height=400,
+            column_config={
+                "Link": st.column_config.LinkColumn("Link", display_text="🔗 Xem"),
+            },
+        )
+
+        if sync_sheet:
+            with st.spinner("Đang ghi dữ liệu lên Google Sheet..."):
+                try:
+                    meta = write_to_google_sheet(
+                        fdf, merge_existing=merge_old
+                    )
+                    meta["tours_scraped"] = len(fdf)
+                    st.success(
+                        f"Đã lưu **{meta['rows_written']}** dòng vào sheet "
+                        f"**{meta['sheet_title']}** "
+                        f"({meta['rows_scraped']} tour quét mới, "
+                        f"{'merge' if meta.get('merged') else 'ghi đè'})."
+                    )
+                    st.json(meta)
+                    st.cache_data.clear()
+                    load_findtourgo_sheet.clear()
+                    _cached_scrape_findtourgo.clear()
                     st.rerun()
                 except FileNotFoundError as exc:
                     st.error(str(exc))
@@ -1292,6 +1456,22 @@ def main():
                 _cached_scrape_vietravel.clear()
                 st.rerun()
         tab_vietravel_sync()
+        return
+
+    if page == "🌐 FindTourGo":
+        with st.sidebar:
+            st.markdown(
+                f"<div style='text-align:center;padding:16px 0 8px;'>"
+                f"<div style='font-size:2.4rem;'>🌐</div>"
+                f"<div style='font-weight:700;font-size:1.05rem;color:{PRIMARY};'>FindTourGo</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+            if st.button("🔄 Làm mới Sheet FindTourGo", use_container_width=True):
+                load_findtourgo_sheet.clear()
+                _cached_scrape_findtourgo.clear()
+                st.rerun()
+        tab_findtourgo_sync()
         return
 
     # Các trang phân tích đối thủ (~3MB sheet)

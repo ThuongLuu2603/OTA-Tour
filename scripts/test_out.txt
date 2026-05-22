@@ -1,0 +1,11 @@
+﻿total 151
+thi_truong
+Du lá»‹ch trong nÆ°á»›c    76
+Du lá»‹ch nÆ°á»›c ngoĂ i    75
+--- sample ---
+ten_tour : TP.HCM â€“ MÅ¨I NĂ‰ | BIá»‚N XANH â€“ Äá»’I CĂT  â€“ TRáº¢I NGHIá»†M NAM Bá»˜ | Phan Thiáº¿t â€“ BĂ u Tráº¯ng â€“ LĂ ng ChĂ i XÆ°a
+diem_kh : HĂ  Ná»™i
+thoi_gian : 2N1Ä
+gia : 8.790.000
+lich_kh : 11/06/2026, 25/06/2026, 27/06/2026, 18/07/2026, 06/08/2026, 15/08/2026, 20/08/2026, 01/10/2026, 15/10/2026
+link_url : https://travel.com.vn/chuong-trinh/tp-ho-chi-minh-phan-thiet-mui-ne-thuong-thuc-tha-lau-am-thuc-tru-danh-mui-ne-trai-ngh

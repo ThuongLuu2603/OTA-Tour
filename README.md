@@ -16,6 +16,7 @@ Dữ liệu đọc trực tiếp từ Google Sheets (public) — không cần AP
 | 📅 **Lịch KH** | Calendar heatmap 120 ngày · Lịch theo tháng × thị trường · Ngày trong tuần · Danh sách chuyến sắp tới |
 | 📋 **Dữ Liệu** | Bảng đầy đủ với link clickable · Export CSV & Excel |
 | 🔄 **Vietravel** | Quét tour từ travel.com.vn · Lưu vào tab Vietravel trên Google Sheet |
+| 🌐 **FindTourGo** | Quét OTA findtourgo.com (Trung Quốc / Nhật Bản / Việt Nam) · Nhiều công ty LH · Lưu tab FindTourGo |
 
 **Sidebar filters:** Thị trường · Công ty · Tuyến · Điểm khởi hành · Loại lịch · Khoảng giá
 
@@ -46,6 +47,29 @@ Và ghi vào tab **Vietravel** trên Google Sheet:
 ```bash
 python sync_vietravel.py --preview   # chỉ xem số lượng tour quét được
 python sync_vietravel.py             # quét + ghi Sheet
+```
+
+---
+
+## Quét tour FindTourGo (OTA)
+
+Nguồn: API FindTourGo — quét **mọi quốc gia** có tour (~30+ nước, ~600+ sản phẩm).
+
+Ghi vào tab **FindTourGo** (`gid=408521834`):  
+[Sheet](https://docs.google.com/spreadsheets/d/1sI34D88zsmSrN7Jf9fS3jh4aUvaep-blxnBR1CGq9eM/edit#gid=408521834)
+
+Cột chính: **Công ty lữ hành** (mỗi tour một operator khác nhau), **Nguồn** (thị trường từ tên tour), **Quốc gia** (điểm đến), **Mã tour**, **Link tour** / **Link thô**.
+
+Mặc định khi lưu: **ghi đè toàn bộ tab**. Tick *Merge* nếu muốn giữ tour không trùng mã.
+
+**Trong app:** Tab **🌐 FindTourGo** → *Quét thử* hoặc *Quét & Lưu* (cột Link hiển thị 🔗 Xem như tab Dữ liệu)
+
+**CLI:**
+```bash
+python sync_findtourgo.py --preview           # xem thống kê
+python sync_findtourgo.py                      # quét tất cả quốc gia + ghi Sheet
+python sync_findtourgo.py --countries CN JP VN # chỉ một vài quốc gia
+python sync_findtourgo.py --merge              # merge theo mã tour
 ```
 
 ---
