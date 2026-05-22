@@ -118,47 +118,64 @@ def _classify_schedule(val):
     return "Khác"
 
 
+def _year_bounds():
+    """Acceptable calendar years for tour departure dates."""
+    y = date.today().year
+    return y - 2, y + 3
+
+
+def _safe_date(y: int, mo: int, d: int, today: date | None = None):
+    """Build date if year/month/day are plausible; otherwise None."""
+    today = today or date.today()
+    y_min, y_max = _year_bounds()
+    if not (y_min <= y <= y_max and 1 <= mo <= 12 and 1 <= d <= 31):
+        return None
+    try:
+        dt = date(y, mo, d)
+    except ValueError:
+        return None
+    # Upcoming / recent departures only (ignore ancient or far-future typos)
+    if dt < today - timedelta(days=60) or dt > today + timedelta(days=800):
+        return None
+    return dt
+
+
 def _extract_dates(val):
     """Return sorted list of upcoming date objects from schedule string."""
     if pd.isna(val) or str(val).strip() in ("", "nan", "None"):
         return []
-    s = str(val)
+    s = str(val).strip().replace("Hằng ngày", "Hàng ngày")
     today = date.today()
     results = []
 
-    # "Tháng 6: 18, 25 năm 2026"
+    # "Tháng 6: 18, 25 năm 2026" or "Tháng 4: 30 2025"
     for m in re.finditer(
-        r"Tháng\s+(\d{1,2})\s*:\s*([\d,\s]+)(?:\s*năm\s+(\d{4}))?",
+        r"Tháng\s+(\d{1,2})\s*:\s*([\d,\s]+?)(?:\s*năm\s+(\d{4}))?(?=\s*(?:Tháng|$)|\s*$)",
         s, re.IGNORECASE,
     ):
         mo = int(m.group(1))
-        yr = int(m.group(3)) if m.group(3) else today.year
-        for d in m.group(2).split(","):
-            d = d.strip()
-            if d.isdigit():
-                try:
-                    dt = date(yr, mo, int(d))
-                    if dt >= today:
-                        results.append(dt)
-                except ValueError:
-                    pass
+        default_yr = int(m.group(3)) if m.group(3) else today.year
+        day_blob = m.group(2)
+        # "18, 25" or "30 2025"
+        for dm in re.finditer(r"(\d{1,2})(?:\s+(\d{4}))?", day_blob):
+            d = int(dm.group(1))
+            yr = int(dm.group(2)) if dm.group(2) else default_yr
+            dt = _safe_date(yr, mo, d, today)
+            if dt:
+                results.append(dt)
 
-    # "18/06/2026" or "18/6/26"
+    # "18/06/2026" or "18/6/26" — require explicit year to avoid matching prices (1.050.000)
     if not results:
         for m in re.finditer(
-            r"\b(\d{1,2})[/\-.](\d{1,2})(?:[/\-.](\d{2,4}))?\b", s
+            r"\b(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})\b", s
         ):
             d, mo = int(m.group(1)), int(m.group(2))
-            yr = int(m.group(3)) if m.group(3) else today.year
+            yr = int(m.group(3))
             if yr < 100:
                 yr += 2000
-            if 1 <= d <= 31 and 1 <= mo <= 12:
-                try:
-                    dt = date(yr, mo, d)
-                    if dt >= today:
-                        results.append(dt)
-                except ValueError:
-                    pass
+            dt = _safe_date(yr, mo, d, today)
+            if dt:
+                results.append(dt)
 
     return sorted(set(results))
 
@@ -846,17 +863,26 @@ def tab_schedule(df: pd.DataFrame):
     for _, row in df.iterrows():
         for d in row.get("ngay_kh_list", []):
             rows.append({
-                "date": pd.Timestamp(d),
+                "date": d,
                 "cong_ty": row["cong_ty"],
                 "tuyen_tour": row["tuyen_tour"],
                 "ten_tour": row["ten_tour"],
                 "thi_truong": row["thi_truong"],
             })
 
+    ddf = pd.DataFrame()
     if rows:
         ddf = pd.DataFrame(rows)
-        ddf["date"] = pd.to_datetime(ddf["date"])
+        ddf["date"] = pd.to_datetime(ddf["date"], errors="coerce")
+        ddf = ddf.dropna(subset=["date"])
+        y_min, y_max = _year_bounds()
+        ddf = ddf[
+            (ddf["date"].dt.year >= y_min) & (ddf["date"].dt.year <= y_max)
+        ]
+
+    if not ddf.empty:
         ddf["weekday"] = ddf["date"].dt.weekday
+        today = date.today()
 
         with c2:
             dow = ddf["weekday"].value_counts().reindex(range(7), fill_value=0)
@@ -871,7 +897,6 @@ def tab_schedule(df: pd.DataFrame):
             st.plotly_chart(fig, use_container_width=True)
 
         # ── Calendar Heatmap
-        today = date.today()
         horizon = today + timedelta(days=120)
         daily = ddf.groupby("date").size().reset_index(name="count")
         date_range = pd.DataFrame({"date": pd.date_range(today, horizon)})
